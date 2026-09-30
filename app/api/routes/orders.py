@@ -4,20 +4,16 @@ from fastapi import (
     status,
 )
 
-from sqlalchemy.orm import Session
-
-from app.api.dependencies import get_db
+from app.api.dependencies import get_order_service
 
 from app.schemas.orders import (
+    CancelOrderResponse,
     CreateOrderRequest,
     CreateOrderResponse,
     OrderResponse,
-    CancelOrderResponse,
 )
 
-from app.services.orders import (
-    OrderService,
-)
+from app.services.orders import OrderService
 
 router = APIRouter(
     prefix="/api/v1/orders",
@@ -37,9 +33,8 @@ router = APIRouter(
 )
 def create_order(
     request: CreateOrderRequest,
-    db: Session = Depends(get_db),
-):
-    service = OrderService(db)
+    service: OrderService = Depends(get_order_service),
+) -> CreateOrderResponse:
 
     return service.create_order(request)
 
@@ -55,9 +50,8 @@ def create_order(
 )
 def get_order(
     order_id: str,
-    db: Session = Depends(get_db),
-):
-    service = OrderService(db)
+    service: OrderService = Depends(get_order_service),
+) -> OrderResponse:
 
     return service.get_order(order_id)
 
@@ -73,8 +67,7 @@ def get_order(
 )
 def cancel_order(
     order_id: str,
-    db: Session = Depends(get_db),
-):
-    service = OrderService(db)
+    service: OrderService = Depends(get_order_service),
+) -> CancelOrderResponse:
 
     return service.cancel_order(order_id)

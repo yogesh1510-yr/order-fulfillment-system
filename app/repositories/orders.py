@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import (
     Session,
     selectinload,
+    joinedload
 )
 
 from app.models.order import (
@@ -44,13 +45,36 @@ class OrderRepository:
         order_id: str,
     ) -> Order | None:
 
+        """
+        Get an order together with the related data
+        required to build the complete order response.
+
+        Scalar relationships are loaded with joinedload().
+        Collection relationships are loaded with selectinload().
+        """
+
         statement = (
             select(Order)
             .options(
-                selectinload(Order.items).selectinload(OrderItem.product),
-                selectinload(Order.shipping_address),
+                # Order -> Warehouse
+                # Many-to-one scalar relationship.
+                joinedload(Order.warehouse),
+
+                # Order -> ShippingAddress
+                # One-to-one scalar relationship.
+                joinedload(Order.shipping_address),
+
+                # Order -> OrderItems is one-to-many,
+                # so load the collection with selectinload().
+                #
+                # OrderItem -> Product is many-to-one,
+                # so join the Product while loading the items.
+                selectinload(Order.items).joinedload(
+                    OrderItem.product
+                ),
+
+                # Order -> StatusHistory is one-to-many.
                 selectinload(Order.status_history),
-                selectinload(Order.warehouse),
             )
             .where(Order.order_id == order_id)
         )

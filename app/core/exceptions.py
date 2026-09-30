@@ -1,4 +1,4 @@
-class NovaCartError(Exception):
+class OrderFulfillmentError(Exception):
     """
     Base exception for NovaCart application errors.
     """
@@ -6,7 +6,7 @@ class NovaCartError(Exception):
     pass
 
 
-class CustomerNotFoundError(NovaCartError):
+class CustomerNotFoundError(OrderFulfillmentError):
 
     def __init__(
         self,
@@ -17,7 +17,7 @@ class CustomerNotFoundError(NovaCartError):
         super().__init__(f"Customer '{customer_id}' was not found")
 
 
-class ProductNotFoundError(NovaCartError):
+class ProductNotFoundError(OrderFulfillmentError):
 
     def __init__(
         self,
@@ -28,13 +28,13 @@ class ProductNotFoundError(NovaCartError):
         super().__init__("One or more products were not found")
 
 
-class InsufficientInventoryError(NovaCartError):
+class InsufficientInventoryError(OrderFulfillmentError):
 
     def __init__(self):
         super().__init__("No warehouse can fulfill the entire order")
 
 
-class OrderNotFoundError(NovaCartError):
+class OrderNotFoundError(OrderFulfillmentError):
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class OrderNotFoundError(NovaCartError):
         super().__init__(f"Order '{order_id}' was not found")
 
 
-class OrderCannotBeCancelledError(NovaCartError):
+class OrderCannotBeCancelledError(OrderFulfillmentError):
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class OrderCannotBeCancelledError(NovaCartError):
         )
 
 
-class InventoryConsistencyError(NovaCartError):
+class InventoryConsistencyError(OrderFulfillmentError):
 
     def __init__(
         self,

@@ -1,30 +1,26 @@
-import os
-
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-
-# Load variables from .env
-load_dotenv()
+from app.core.config import DATABASE_URL
 
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL environment variable is not configured"
-    )
-
-
+# ---------------------------------------------------------
 # SQLAlchemy Engine
+# ---------------------------------------------------------
+# The Engine manages database connectivity and the
+# underlying connection pool used to communicate with
+# PostgreSQL.
 engine = create_engine(
     DATABASE_URL,
     echo=False,
 )
 
 
-# Factory used to create SQLAlchemy Sessions
+# ---------------------------------------------------------
+# Session factory
+# ---------------------------------------------------------
+# SessionLocal is a factory. Calling SessionLocal()
+# creates a new SQLAlchemy Session.
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,

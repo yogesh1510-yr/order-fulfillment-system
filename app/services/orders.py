@@ -57,8 +57,9 @@ from app.schemas.orders import (
 
 class OrderService:
     """
-    Contains NovaCart order business logic.
+    Contains order fulfillment business logic.
     """
+    
 
     def __init__(
         self,
