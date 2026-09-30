@@ -25,7 +25,7 @@ from app.api.exception_handlers import (
 )
 
 app = FastAPI(
-    title=("NovaCart Order & Fulfillment Platform"),
+    title=("E-Commerce Order and Order Fulfillment Platform"),
     version="1.0.0",
 )
 
