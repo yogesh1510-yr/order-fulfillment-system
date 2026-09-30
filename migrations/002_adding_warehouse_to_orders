@@ -1,0 +1,10 @@
+ALTER TABLE orders
+ADD COLUMN warehouse_id VARCHAR(50);
+
+ALTER TABLE orders
+ADD CONSTRAINT fk_orders_warehouse
+FOREIGN KEY (warehouse_id)
+REFERENCES warehouses(warehouse_id);
+
+ALTER TABLE orders
+ALTER COLUMN warehouse_id SET NOT NULL;
