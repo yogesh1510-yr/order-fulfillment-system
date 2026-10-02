@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    func
 )
 
 from sqlalchemy.orm import (
@@ -114,11 +115,13 @@ class Order(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     customer: Mapped["Customer"] = relationship(back_populates="orders")
@@ -185,6 +188,7 @@ class OrderItem(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     order: Mapped["Order"] = relationship(back_populates="items")
@@ -285,6 +289,7 @@ class OrderStatusHistory(Base):
     status_open_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     status_close_date: Mapped[datetime | None] = mapped_column(

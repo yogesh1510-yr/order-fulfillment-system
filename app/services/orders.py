@@ -54,12 +54,17 @@ from app.schemas.orders import (
     CancelOrderResponse,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+logger.info("Application logging configured")
+
 
 class OrderService:
     """
     Contains order fulfillment business logic.
     """
-    
 
     def __init__(
         self,
@@ -84,6 +89,11 @@ class OrderService:
     ) -> CreateOrderResponse:
 
         try:
+            
+            logger.info(
+                "Order creation started customer_id=%s",
+                request.customer_id,
+            )
 
             # -------------------------------------------------
             # 1. IDEMPOTENCY
@@ -376,6 +386,12 @@ class OrderService:
 
             self.db.commit()
 
+            logger.info(
+                "Order created successfully order_id=%s warehouse_id=%s",
+                order_id,
+                selected_warehouse_id,
+            )
+
             return CreateOrderResponse(
                 order_id=order.order_id,
                 status=order.status,
@@ -405,7 +421,10 @@ class OrderService:
             raise
 
         except Exception:
-
+            logger.exception(
+                "Order creation failed customer_id=%s",
+                request.customer_id,
+            )
             self.db.rollback()
             raise
 

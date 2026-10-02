@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     Numeric,
     String,
+    func
 )
 
 from sqlalchemy.orm import (
@@ -56,11 +57,13 @@ class Product(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        server_default=func.now()
     )
 
     inventory_records: Mapped[list["Inventory"]] = relationship(
