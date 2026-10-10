@@ -58,3 +58,6 @@ jobs:
 
       - name: Parse dbt project
         run: dbt parse
+
+      - name: Compile dbt models
+        run: dbt compile --target ci
