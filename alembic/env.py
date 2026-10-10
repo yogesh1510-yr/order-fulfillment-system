@@ -13,6 +13,7 @@ import app.models.order
 import app.models.product
 import app.models.inventory
 import app.models.warehouse
+import app.models.payment
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

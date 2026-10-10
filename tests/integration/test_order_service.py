@@ -15,6 +15,9 @@ from app.core.exceptions import (
 )
 from app.models.customer import Customer
 from app.models.inventory import Inventory
+from app.models.payment import Payment
+from app.payments.gateway import PaymentStatus
+from app.payments.fake_gateway import FakePaymentGateway
 from app.models.order import (
     Order,
     OrderItem,
@@ -29,6 +32,55 @@ from app.schemas.orders import (
     ShippingAddress,
 )
 from app.services.orders import OrderService
+
+
+class TimeoutPaymentGateway:
+    def charge(
+        self,
+        *,
+        order_id: str,
+        amount: Decimal,
+        idempotency_key: str,
+    ):
+        raise TimeoutError("Payment provider timed out")
+
+
+class LostResponsePaymentGateway(FakePaymentGateway):
+    """
+    Simulates this scenario:
+
+    First call:
+        payment succeeds at provider,
+        but response is lost.
+
+    Later calls with the same idempotency key:
+        provider returns the original successful result
+        without charging again.
+    """
+
+    def __init__(self):
+        super().__init__(should_succeed=True)
+        self._first_call = True
+
+    def charge(
+        self,
+        *,
+        order_id: str,
+        amount: Decimal,
+        idempotency_key: str,
+    ):
+        result = super().charge(
+            order_id=order_id,
+            amount=amount,
+            idempotency_key=idempotency_key,
+        )
+
+        if self._first_call:
+            self._first_call = False
+
+            raise TimeoutError("Payment succeeded but response was lost")
+
+        return result
 
 
 # =========================================================
@@ -187,7 +239,12 @@ def test_create_order_success(
         quantity=2,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
     response = service.create_order(request)
@@ -197,7 +254,7 @@ def test_create_order_success(
     assert response.status == OrderStatus.CONFIRMED.value
     assert response.warehouse_id == "WH-001"
     assert response.total_amount == Decimal("1000.00")
-    assert response.message == "Order created successfully"
+    assert response.message == "Order created and payment successful"
 
     # -----------------------------------------------------
     # Verify Order exists in database
@@ -225,9 +282,7 @@ def test_create_order_success(
     # -----------------------------------------------------
 
     item = db_session.scalar(
-        select(OrderItem).where(
-            OrderItem.order_id == response.order_id
-        )
+        select(OrderItem).where(OrderItem.order_id == response.order_id)
     )
 
     assert item is not None
@@ -253,19 +308,35 @@ def test_create_order_success(
 
     # -----------------------------------------------------
     # Verify Status History
+    #
+    # Successful payment now creates:
+    #
+    # PAYMENT_PENDING -> CONFIRMED
     # -----------------------------------------------------
 
-    history = db_session.scalar(
-        select(OrderStatusHistory).where(
-            OrderStatusHistory.order_id
-            == response.order_id
-        )
+    histories = list(
+        db_session.scalars(
+            select(OrderStatusHistory)
+            .where(OrderStatusHistory.order_id == response.order_id)
+            .order_by(OrderStatusHistory.status_open_date)
+        ).all()
     )
 
-    assert history is not None
-    assert history.status == OrderStatus.CONFIRMED.value
-    assert history.status_open_date is not None
-    assert history.status_close_date is None
+    assert len(histories) == 2
+
+    payment_pending = histories[0]
+
+    assert payment_pending.status == OrderStatus.PAYMENT_PENDING.value
+    assert payment_pending.status_open_date is not None
+    assert payment_pending.status_close_date is not None
+
+    confirmed = histories[1]
+
+    assert confirmed.status == OrderStatus.CONFIRMED.value
+    assert confirmed.status_open_date is not None
+    assert confirmed.status_close_date is None
+
+    assert payment_pending.status_close_date == confirmed.status_open_date
 
 
 # =========================================================
@@ -289,7 +360,12 @@ def test_create_order_reserves_inventory(
         quantity=3,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
     service.create_order(request)
@@ -356,7 +432,12 @@ def test_create_order_aggregates_duplicate_products(
         ),
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
     response = service.create_order(request)
@@ -376,9 +457,7 @@ def test_create_order_aggregates_duplicate_products(
 
     items = list(
         db_session.scalars(
-            select(OrderItem).where(
-                OrderItem.order_id == response.order_id
-            )
+            select(OrderItem).where(OrderItem.order_id == response.order_id)
         ).all()
     )
 
@@ -411,7 +490,12 @@ def test_create_order_customer_not_found(
         customer_id="CUST-NOT-FOUND",
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act + Assert
     with pytest.raises(CustomerNotFoundError):
@@ -421,11 +505,7 @@ def test_create_order_customer_not_found(
     # No order should have been created
     # -----------------------------------------------------
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert orders == []
 
@@ -446,7 +526,12 @@ def test_create_order_product_not_found(
         product_id="PROD-NOT-FOUND",
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act + Assert
     with pytest.raises(ProductNotFoundError):
@@ -456,11 +541,7 @@ def test_create_order_product_not_found(
     # No order should have been created
     # -----------------------------------------------------
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert orders == []
 
@@ -506,13 +587,16 @@ def test_create_order_insufficient_inventory(
         quantity=3,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act + Assert
 
-    with pytest.raises(
-        InsufficientInventoryError
-    ):
+    with pytest.raises(InsufficientInventoryError):
         service.create_order(request)
 
     # -----------------------------------------------------
@@ -540,11 +624,7 @@ def test_create_order_insufficient_inventory(
     # No Order should have been created
     # -----------------------------------------------------
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert orders == []
 
@@ -568,7 +648,12 @@ def test_create_order_idempotent_retry(
         quantity=2,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # -----------------------------------------------------
     # First request
@@ -610,11 +695,7 @@ def test_create_order_idempotent_retry(
     # Only one order must exist
     # -----------------------------------------------------
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert len(orders) == 1
 
@@ -694,51 +775,39 @@ def test_create_order_multi_product_all_or_nothing(
         ),
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act + Assert
 
-    with pytest.raises(
-        InsufficientInventoryError
-    ):
+    with pytest.raises(InsufficientInventoryError):
         service.create_order(request)
 
     # -----------------------------------------------------
     # Re-query inventory
     # -----------------------------------------------------
 
-    inventories = list(
-        db_session.scalars(
-            select(Inventory)
-        ).all()
-    )
+    inventories = list(db_session.scalars(select(Inventory)).all())
 
     inventory_by_product = {
-        inventory.product_id: inventory
-        for inventory in inventories
+        inventory.product_id: inventory for inventory in inventories
     }
 
     # Product 1 must NOT be partially reserved.
-    assert (
-        inventory_by_product["PROD-001"].reserved_quantity
-        == 0
-    )
+    assert inventory_by_product["PROD-001"].reserved_quantity == 0
 
     # Product 2 must also remain unchanged.
-    assert (
-        inventory_by_product["PROD-002"].reserved_quantity
-        == 0
-    )
+    assert inventory_by_product["PROD-002"].reserved_quantity == 0
 
     # -----------------------------------------------------
     # No order should exist
     # -----------------------------------------------------
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert orders == []
 
@@ -795,7 +864,12 @@ def test_create_order_selects_postal_code_match(
         quantity=2,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
 
@@ -856,7 +930,12 @@ def test_create_order_selects_city_match_over_state_match(
         quantity=2,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
 
@@ -918,7 +997,12 @@ def test_create_order_uses_remaining_stock_as_tiebreaker(
         quantity=2,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
 
@@ -1040,7 +1124,12 @@ def test_create_order_selects_warehouse_that_can_fulfill_all_products(
         ),
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act
 
@@ -1056,9 +1145,7 @@ def test_create_order_selects_warehouse_that_can_fulfill_all_products(
 
     wh1_inventory = list(
         db_session.scalars(
-            select(Inventory).where(
-                Inventory.warehouse_id == "WH-001"
-            )
+            select(Inventory).where(Inventory.warehouse_id == "WH-001")
         ).all()
     )
 
@@ -1071,26 +1158,15 @@ def test_create_order_selects_warehouse_that_can_fulfill_all_products(
 
     wh2_inventory = list(
         db_session.scalars(
-            select(Inventory).where(
-                Inventory.warehouse_id == "WH-002"
-            )
+            select(Inventory).where(Inventory.warehouse_id == "WH-002")
         ).all()
     )
 
-    wh2_by_product = {
-        inventory.product_id: inventory
-        for inventory in wh2_inventory
-    }
+    wh2_by_product = {inventory.product_id: inventory for inventory in wh2_inventory}
 
-    assert (
-        wh2_by_product["PROD-001"].reserved_quantity
-        == 2
-    )
+    assert wh2_by_product["PROD-001"].reserved_quantity == 2
 
-    assert (
-        wh2_by_product["PROD-002"].reserved_quantity
-        == 2
-    )
+    assert wh2_by_product["PROD-002"].reserved_quantity == 2
 
 
 # =========================================================
@@ -1103,10 +1179,6 @@ def test_get_order_success(
 ):
     # -----------------------------------------------------
     # Arrange
-    #
-    # Instead of manually creating Order + OrderItem +
-    # Address + History, let our real create_order()
-    # create everything.
     # -----------------------------------------------------
 
     create_standard_order_data(
@@ -1119,19 +1191,20 @@ def test_get_order_success(
         quantity=2,
     )
 
-    service = OrderService(db_session)
-
-    created = service.create_order(
-        create_request
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
     )
+
+    created = service.create_order(create_request)
 
     # -----------------------------------------------------
     # Act
     # -----------------------------------------------------
 
-    response = service.get_order(
-        created.order_id
-    )
+    response = service.get_order(created.order_id)
 
     # -----------------------------------------------------
     # Assert - ORDER
@@ -1141,10 +1214,7 @@ def test_get_order_success(
     assert response.customer_id == "CUST-001"
     assert response.warehouse_id == "WH-001"
 
-    assert (
-        response.status
-        == OrderStatus.CONFIRMED.value
-    )
+    assert response.status == OrderStatus.CONFIRMED.value
 
     assert response.created_at is not None
 
@@ -1186,46 +1256,39 @@ def test_get_order_success(
     # Assert - PRICING
     # -----------------------------------------------------
 
-    assert (
-        response.pricing.subtotal_amount
-        == Decimal("1000.00")
-    )
+    assert response.pricing.subtotal_amount == Decimal("1000.00")
 
-    assert (
-        response.pricing.tax_amount
-        == Decimal("0.00")
-    )
+    assert response.pricing.tax_amount == Decimal("0.00")
 
-    assert (
-        response.pricing.handling_amount
-        == Decimal("0.00")
-    )
+    assert response.pricing.handling_amount == Decimal("0.00")
 
-    assert (
-        response.pricing.discount_amount
-        == Decimal("0.00")
-    )
+    assert response.pricing.discount_amount == Decimal("0.00")
 
-    assert (
-        response.pricing.total_amount
-        == Decimal("1000.00")
-    )
+    assert response.pricing.total_amount == Decimal("1000.00")
 
     # -----------------------------------------------------
     # Assert - STATUS HISTORY
+    #
+    # PAYMENT_PENDING -> CONFIRMED
     # -----------------------------------------------------
 
-    assert len(response.status_history) == 1
+    assert len(response.status_history) == 2
 
-    history = response.status_history[0]
+    payment_pending = response.status_history[0]
 
-    assert (
-        history.status
-        == OrderStatus.CONFIRMED.value
-    )
+    assert payment_pending.status == OrderStatus.PAYMENT_PENDING.value
 
-    assert history.opened_at is not None
-    assert history.closed_at is None
+    assert payment_pending.opened_at is not None
+    assert payment_pending.closed_at is not None
+
+    confirmed = response.status_history[1]
+
+    assert confirmed.status == OrderStatus.CONFIRMED.value
+
+    assert confirmed.opened_at is not None
+    assert confirmed.closed_at is None
+
+    assert payment_pending.closed_at == confirmed.opened_at
 
 
 # =========================================================
@@ -1238,14 +1301,17 @@ def test_get_order_not_found(
 ):
     # Arrange
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     # Act + Assert
 
     with pytest.raises(OrderNotFoundError):
-        service.get_order(
-            "ORD-NOT-FOUND"
-        )
+        service.get_order("ORD-NOT-FOUND")
 
 
 # =========================================================
@@ -1319,7 +1385,12 @@ def test_get_order_returns_multiple_items(
         ),
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(request)
 
@@ -1327,9 +1398,7 @@ def test_get_order_returns_multiple_items(
     # Act
     # -----------------------------------------------------
 
-    response = service.get_order(
-        created.order_id
-    )
+    response = service.get_order(created.order_id)
 
     # -----------------------------------------------------
     # Assert
@@ -1337,42 +1406,21 @@ def test_get_order_returns_multiple_items(
 
     assert len(response.items) == 2
 
-    items_by_product = {
-        item.product_id: item
-        for item in response.items
-    }
+    items_by_product = {item.product_id: item for item in response.items}
 
     # PROD-001
-    assert (
-        items_by_product["PROD-001"].quantity
-        == 2
-    )
+    assert items_by_product["PROD-001"].quantity == 2
 
-    assert (
-        items_by_product["PROD-001"].unit_price
-        == Decimal("500.00")
-    )
+    assert items_by_product["PROD-001"].unit_price == Decimal("500.00")
 
-    assert (
-        items_by_product["PROD-001"].line_total
-        == Decimal("1000.00")
-    )
+    assert items_by_product["PROD-001"].line_total == Decimal("1000.00")
 
     # PROD-002
-    assert (
-        items_by_product["PROD-002"].quantity
-        == 3
-    )
+    assert items_by_product["PROD-002"].quantity == 3
 
-    assert (
-        items_by_product["PROD-002"].unit_price
-        == Decimal("300.00")
-    )
+    assert items_by_product["PROD-002"].unit_price == Decimal("300.00")
 
-    assert (
-        items_by_product["PROD-002"].line_total
-        == Decimal("900.00")
-    )
+    assert items_by_product["PROD-002"].line_total == Decimal("900.00")
 
     # -----------------------------------------------------
     # Total:
@@ -1383,15 +1431,9 @@ def test_get_order_returns_multiple_items(
     #                         1900
     # -----------------------------------------------------
 
-    assert (
-        response.pricing.subtotal_amount
-        == Decimal("1900.00")
-    )
+    assert response.pricing.subtotal_amount == Decimal("1900.00")
 
-    assert (
-        response.pricing.total_amount
-        == Decimal("1900.00")
-    )
+    assert response.pricing.total_amount == Decimal("1900.00")
 
 
 # =========================================================
@@ -1411,7 +1453,12 @@ def test_get_order_sorts_status_history_by_open_date(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1421,23 +1468,49 @@ def test_get_order_sorts_status_history_by_open_date(
     )
 
     # -----------------------------------------------------
-    # Fetch the automatically-created CONFIRMED history.
+    # Fetch existing histories explicitly.
     # -----------------------------------------------------
 
-    confirmed_history = db_session.scalar(
+    payment_pending_history = db_session.scalar(
         select(OrderStatusHistory).where(
-            OrderStatusHistory.order_id
-            == created.order_id
+            OrderStatusHistory.order_id == created.order_id,
+            OrderStatusHistory.status == OrderStatus.PAYMENT_PENDING.value,
         )
     )
 
+    confirmed_history = db_session.scalar(
+        select(OrderStatusHistory).where(
+            OrderStatusHistory.order_id == created.order_id,
+            OrderStatusHistory.status == OrderStatus.CONFIRMED.value,
+        )
+    )
+
+    assert payment_pending_history is not None
     assert confirmed_history is not None
 
     # -----------------------------------------------------
-    # Give it a known timestamp.
+    # Give each history a deliberately known timestamp.
     # -----------------------------------------------------
 
     from datetime import datetime, timezone
+
+    payment_pending_history.status_open_date = datetime(
+        2026,
+        1,
+        1,
+        9,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    payment_pending_history.status_close_date = datetime(
+        2026,
+        1,
+        1,
+        10,
+        0,
+        tzinfo=timezone.utc,
+    )
 
     confirmed_history.status_open_date = datetime(
         2026,
@@ -1483,30 +1556,24 @@ def test_get_order_sorts_status_history_by_open_date(
     # Act
     # -----------------------------------------------------
 
-    response = service.get_order(
-        created.order_id
-    )
+    response = service.get_order(created.order_id)
 
     # -----------------------------------------------------
     # Assert
     # -----------------------------------------------------
 
-    assert len(response.status_history) == 2
+    assert len(response.status_history) == 3
 
-    assert (
-        response.status_history[0].status
-        == OrderStatus.CONFIRMED.value
-    )
+    assert response.status_history[0].status == OrderStatus.PAYMENT_PENDING.value
 
-    assert (
-        response.status_history[1].status
-        == "TEST_LATER_STATUS"
-    )
+    assert response.status_history[1].status == OrderStatus.CONFIRMED.value
 
-    assert (
-        response.status_history[0].opened_at
-        < response.status_history[1].opened_at
-    )
+    assert response.status_history[2].status == "TEST_LATER_STATUS"
+
+    opened_dates = [history.opened_at for history in response.status_history]
+
+    assert opened_dates == sorted(opened_dates)
+
 
 # =========================================================
 # 17. CANCEL ORDER SUCCESS
@@ -1523,7 +1590,12 @@ def test_cancel_order_success(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1534,9 +1606,7 @@ def test_cancel_order_success(
 
     # Act
 
-    response = service.cancel_order(
-        created.order_id
-    )
+    response = service.cancel_order(created.order_id)
 
     # Assert response
 
@@ -1570,7 +1640,12 @@ def test_cancel_order_releases_inventory(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1594,9 +1669,7 @@ def test_cancel_order_releases_inventory(
 
     # Act
 
-    service.cancel_order(
-        created.order_id
-    )
+    service.cancel_order(created.order_id)
 
     # Refresh after cancellation
 
@@ -1624,7 +1697,12 @@ def test_cancel_order_updates_status_history(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1635,56 +1713,58 @@ def test_cancel_order_updates_status_history(
 
     # Act
 
-    service.cancel_order(
-        created.order_id
-    )
+    service.cancel_order(created.order_id)
 
+    # -----------------------------------------------------
     # Get history directly from DB.
+    # -----------------------------------------------------
 
     histories = list(
         db_session.scalars(
-            select(OrderStatusHistory).where(
-                OrderStatusHistory.order_id
-                == created.order_id
-            )
+            select(OrderStatusHistory)
+            .where(OrderStatusHistory.order_id == created.order_id)
+            .order_by(OrderStatusHistory.status_open_date)
         ).all()
     )
 
-    assert len(histories) == 2
+    assert len(histories) == 3
 
-    history_by_status = {
-        history.status: history
-        for history in histories
-    }
+    history_by_status = {history.status: history for history in histories}
 
     # -----------------------------------------------------
-    # CONFIRMED history should now be CLOSED.
+    # PAYMENT_PENDING should be CLOSED.
     # -----------------------------------------------------
 
-    confirmed = history_by_status[
-        OrderStatus.CONFIRMED.value
-    ]
+    payment_pending = history_by_status[OrderStatus.PAYMENT_PENDING.value]
+
+    assert payment_pending.status_open_date is not None
+    assert payment_pending.status_close_date is not None
+
+    # -----------------------------------------------------
+    # CONFIRMED should also be CLOSED.
+    # -----------------------------------------------------
+
+    confirmed = history_by_status[OrderStatus.CONFIRMED.value]
 
     assert confirmed.status_open_date is not None
     assert confirmed.status_close_date is not None
 
     # -----------------------------------------------------
-    # CANCELLED history should be OPEN.
+    # CANCELLED should be OPEN/current.
     # -----------------------------------------------------
 
-    cancelled = history_by_status[
-        OrderStatus.CANCELLED.value
-    ]
+    cancelled = history_by_status[OrderStatus.CANCELLED.value]
 
     assert cancelled.status_open_date is not None
     assert cancelled.status_close_date is None
 
-    # The new status starts when the old one closes.
+    # -----------------------------------------------------
+    # Verify lifecycle continuity.
+    # -----------------------------------------------------
 
-    assert (
-        confirmed.status_close_date
-        == cancelled.status_open_date
-    )
+    assert payment_pending.status_close_date == confirmed.status_open_date
+
+    assert confirmed.status_close_date == cancelled.status_open_date
 
 
 # =========================================================
@@ -1702,7 +1782,12 @@ def test_cancel_order_is_idempotent(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1711,16 +1796,13 @@ def test_cancel_order_is_idempotent(
         )
     )
 
-    # First cancellation.
+    # -----------------------------------------------------
+    # First cancellation
+    # -----------------------------------------------------
 
-    first_response = service.cancel_order(
-        created.order_id
-    )
+    first_response = service.cancel_order(created.order_id)
 
-    assert (
-        first_response.status
-        == OrderStatus.CANCELLED.value
-    )
+    assert first_response.status == OrderStatus.CANCELLED.value
 
     # Inventory should already be released.
 
@@ -1738,19 +1820,11 @@ def test_cancel_order_is_idempotent(
     # Second cancellation
     # -----------------------------------------------------
 
-    second_response = service.cancel_order(
-        created.order_id
-    )
+    second_response = service.cancel_order(created.order_id)
 
-    assert (
-        second_response.status
-        == OrderStatus.CANCELLED.value
-    )
+    assert second_response.status == OrderStatus.CANCELLED.value
 
-    assert (
-        second_response.message
-        == "Order is already cancelled"
-    )
+    assert second_response.message == "Order is already cancelled"
 
     # -----------------------------------------------------
     # Inventory must NOT be released again.
@@ -1761,24 +1835,33 @@ def test_cancel_order_is_idempotent(
     assert inventory.reserved_quantity == 0
 
     # -----------------------------------------------------
-    # We should still have only two history records:
+    # We should have exactly three history records:
     #
+    # PAYMENT_PENDING
     # CONFIRMED
     # CANCELLED
     #
-    # No second CANCELLED history should be created.
+    # Calling cancel_order() for the second time must NOT
+    # create another CANCELLED history record.
     # -----------------------------------------------------
 
     histories = list(
         db_session.scalars(
             select(OrderStatusHistory).where(
-                OrderStatusHistory.order_id
-                == created.order_id
+                OrderStatusHistory.order_id == created.order_id
             )
         ).all()
     )
 
-    assert len(histories) == 2
+    assert len(histories) == 3
+
+    statuses = [history.status for history in histories]
+
+    assert statuses.count(OrderStatus.PAYMENT_PENDING.value) == 1
+
+    assert statuses.count(OrderStatus.CONFIRMED.value) == 1
+
+    assert statuses.count(OrderStatus.CANCELLED.value) == 1
 
 
 # =========================================================
@@ -1789,12 +1872,15 @@ def test_cancel_order_is_idempotent(
 def test_cancel_order_not_found(
     db_session: Session,
 ):
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     with pytest.raises(OrderNotFoundError):
-        service.cancel_order(
-            "ORD-NOT-FOUND"
-        )
+        service.cancel_order("ORD-NOT-FOUND")
 
 
 # =========================================================
@@ -1812,7 +1898,12 @@ def test_cancel_order_invalid_status(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1840,12 +1931,8 @@ def test_cancel_order_invalid_status(
     # Act + Assert
     # -----------------------------------------------------
 
-    with pytest.raises(
-        OrderCannotBeCancelledError
-    ):
-        service.cancel_order(
-            created.order_id
-        )
+    with pytest.raises(OrderCannotBeCancelledError):
+        service.cancel_order(created.order_id)
 
     # -----------------------------------------------------
     # Inventory must remain reserved because cancellation
@@ -1878,7 +1965,12 @@ def test_cancel_order_inventory_record_missing(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1910,12 +2002,8 @@ def test_cancel_order_inventory_record_missing(
     # Act + Assert
     # -----------------------------------------------------
 
-    with pytest.raises(
-        InventoryConsistencyError
-    ):
-        service.cancel_order(
-            created.order_id
-        )
+    with pytest.raises(InventoryConsistencyError):
+        service.cancel_order(created.order_id)
 
     # -----------------------------------------------------
     # Cancellation must have rolled back.
@@ -1929,10 +2017,7 @@ def test_cancel_order_inventory_record_missing(
 
     assert order is not None
 
-    assert (
-        order.status
-        == OrderStatus.CONFIRMED.value
-    )
+    assert order.status == OrderStatus.CONFIRMED.value
 
 
 # =========================================================
@@ -1950,7 +2035,12 @@ def test_cancel_order_reserved_quantity_too_low(
         total_quantity=10,
     )
 
-    service = OrderService(db_session)
+    service = OrderService(
+        db_session,
+        payment_gateway=FakePaymentGateway(
+            should_succeed=True,
+        ),
+    )
 
     created = service.create_order(
         create_order_request(
@@ -1986,12 +2076,8 @@ def test_cancel_order_reserved_quantity_too_low(
     # Act + Assert
     # -----------------------------------------------------
 
-    with pytest.raises(
-        InventoryConsistencyError
-    ):
-        service.cancel_order(
-            created.order_id
-        )
+    with pytest.raises(InventoryConsistencyError):
+        service.cancel_order(created.order_id)
 
     # -----------------------------------------------------
     # Cancellation should have rolled back.
@@ -2004,10 +2090,7 @@ def test_cancel_order_reserved_quantity_too_low(
 
     assert order is not None
 
-    assert (
-        order.status
-        == OrderStatus.CONFIRMED.value
-    )
+    assert order.status == OrderStatus.CONFIRMED.value
 
     # -----------------------------------------------------
     # The corrupted value existed BEFORE cancellation.
@@ -2023,3 +2106,383 @@ def test_cancel_order_reserved_quantity_too_low(
 
     assert inventory_after is not None
     assert inventory_after.reserved_quantity == 1
+
+
+def test_create_order_with_successful_payment(
+    db_session: Session,
+):
+    # Arrange
+    create_standard_order_data(
+        db_session,
+        total_quantity=10,
+    )
+
+    gateway = FakePaymentGateway(
+        should_succeed=True,
+    )
+
+    service = OrderService(
+        db_session,
+        payment_gateway=gateway,
+    )
+
+    request = create_order_request(
+        idempotency_key="IDEMP-PAYMENT-SUCCESS",
+        quantity=2,
+    )
+
+    # Act
+    response = service.create_order(request)
+
+    # Assert
+    assert response.status == OrderStatus.CONFIRMED.value
+
+    order = service.orders.get_by_id_for_update(response.order_id)
+
+    assert order is not None
+    assert order.status == OrderStatus.CONFIRMED.value
+
+    payments = service.payments.get_for_order(response.order_id)
+
+    assert len(payments) == 1
+
+    payment = payments[0]
+
+    assert payment.status == "SUCCESS"
+    assert payment.amount == response.total_amount
+    assert payment.provider_transaction_id is not None
+    assert payment.failure_reason is None
+
+
+def test_create_order_with_failed_payment(
+    db_session: Session,
+):
+    # Arrange
+    create_standard_order_data(
+        db_session,
+        total_quantity=10,
+    )
+
+    gateway = FakePaymentGateway(
+        should_succeed=False,
+    )
+
+    service = OrderService(
+        db_session,
+        payment_gateway=gateway,
+    )
+
+    request = create_order_request(
+        idempotency_key="IDEMP-PAYMENT-FAILED",
+        quantity=2,
+    )
+
+    # Act
+    response = service.create_order(request)
+
+    # Assert order
+    assert response.status == OrderStatus.CANCELLED.value
+
+    order = service.orders.get_by_id_for_update(response.order_id)
+
+    assert order is not None
+    assert order.status == OrderStatus.CANCELLED.value
+
+    # Assert payment
+    payments = service.payments.get_for_order(response.order_id)
+
+    assert len(payments) == 1
+
+    payment = payments[0]
+
+    assert payment.status == "FAILED"
+    assert payment.amount == response.total_amount
+    assert payment.provider_transaction_id is None
+    assert payment.failure_reason is not None
+
+    # Assert inventory was released
+    inventory = db_session.scalar(
+        select(Inventory).where(
+            Inventory.product_id == "PROD-001",
+            Inventory.warehouse_id == "WH-001",
+        )
+    )
+
+    assert inventory is not None
+    assert inventory.reserved_quantity == 0
+    assert inventory.available_quantity == 10
+
+    # Assert status history
+    histories = sorted(
+        order.status_history,
+        key=lambda history: history.status_open_date,
+    )
+
+    assert len(histories) == 2
+
+    assert histories[0].status == OrderStatus.PAYMENT_PENDING.value
+
+    assert histories[0].status_close_date is not None
+
+    assert histories[1].status == OrderStatus.CANCELLED.value
+
+    assert histories[1].status_close_date is None
+
+
+def test_payment_gateway_timeout_keeps_order_pending(
+    db_session: Session,
+):
+    # -----------------------------------------------------
+    # Arrange
+    # -----------------------------------------------------
+
+    create_standard_order_data(
+        db_session,
+        total_quantity=10,
+    )
+
+    request = create_order_request(
+        idempotency_key="IDEMP-PAYMENT-TIMEOUT",
+        quantity=2,
+    )
+
+    service = OrderService(
+        db_session,
+        payment_gateway=TimeoutPaymentGateway(),  # type: ignore
+    )
+
+    # -----------------------------------------------------
+    # Act
+    # -----------------------------------------------------
+
+    with pytest.raises(
+        TimeoutError,
+        match="Payment provider timed out",
+    ):
+        service.create_order(request)
+
+    # -----------------------------------------------------
+    # The first transaction was already committed.
+    #
+    # Therefore the order must still exist.
+    # -----------------------------------------------------
+
+    order = db_session.scalar(
+        select(Order).where(Order.idempotency_key == "IDEMP-PAYMENT-TIMEOUT")
+    )
+
+    assert order is not None
+
+    assert order.status == OrderStatus.PAYMENT_PENDING.value
+
+    # -----------------------------------------------------
+    # Inventory must remain RESERVED.
+    #
+    # We do NOT know whether the provider charged the
+    # customer, so releasing inventory would be unsafe.
+    # -----------------------------------------------------
+
+    inventory = db_session.scalar(
+        select(Inventory).where(
+            Inventory.product_id == "PROD-001",
+            Inventory.warehouse_id == "WH-001",
+        )
+    )
+
+    assert inventory is not None
+    assert inventory.reserved_quantity == 2
+
+    # -----------------------------------------------------
+    # No payment result was received, so we should not
+    # have a SUCCESS or FAILED payment row.
+    # -----------------------------------------------------
+
+    payments = list(
+        db_session.scalars(
+            select(Payment).where(Payment.order_id == order.order_id)
+        ).all()
+    )
+
+    assert payments == []
+
+
+def test_lost_payment_response_can_be_recovered():
+
+    gateway = LostResponsePaymentGateway()
+
+    payment_key = "PAYMENT-ORD-RECOVERY-001"
+
+    # -------------------------------------------------
+    # FIRST ATTEMPT
+    #
+    # Provider processes the payment successfully,
+    # but our application loses the response.
+    # -------------------------------------------------
+
+    with pytest.raises(
+        TimeoutError,
+        match="Payment succeeded but response was lost",
+    ):
+        gateway.charge(
+            order_id="ORD-RECOVERY-001",
+            amount=Decimal("1000.00"),
+            idempotency_key=payment_key,
+        )
+
+    # -------------------------------------------------
+    # SECOND ATTEMPT
+    #
+    # Same payment idempotency key.
+    #
+    # Provider must NOT create another payment.
+    # It returns the result remembered from attempt #1.
+    # -------------------------------------------------
+
+    recovered_result = gateway.charge(
+        order_id="ORD-RECOVERY-001",
+        amount=Decimal("1000.00"),
+        idempotency_key=payment_key,
+    )
+
+    assert (
+        recovered_result.status
+        == PaymentStatus.SUCCESS
+    )
+
+    assert recovered_result.transaction_id is not None
+
+def test_retry_recovers_payment_after_lost_response(
+    db_session: Session,
+):
+    # -----------------------------------------------------
+    # ARRANGE
+    # -----------------------------------------------------
+
+    create_standard_order_data(
+        db_session,
+        total_quantity=10,
+    )
+
+    request = create_order_request(
+        idempotency_key="IDEMP-PAYMENT-RECOVERY",
+        quantity=2,
+    )
+
+    gateway = LostResponsePaymentGateway()
+
+    service = OrderService(
+        db_session,
+        payment_gateway=gateway,
+    )
+
+    # -----------------------------------------------------
+    # ATTEMPT 1
+    #
+    # Payment succeeds at provider, but response is lost.
+    # -----------------------------------------------------
+
+    with pytest.raises(
+        TimeoutError,
+        match="Payment succeeded but response was lost",
+    ):
+        service.create_order(request)
+
+    # -----------------------------------------------------
+    # Verify our DB is uncertain.
+    # -----------------------------------------------------
+
+    order_after_timeout = db_session.scalar(
+        select(Order).where(
+            Order.idempotency_key
+            == "IDEMP-PAYMENT-RECOVERY"
+        )
+    )
+
+    assert order_after_timeout is not None
+
+    assert (
+        order_after_timeout.status
+        == OrderStatus.PAYMENT_PENDING.value
+    )
+
+    original_order_id = order_after_timeout.order_id
+
+    # -----------------------------------------------------
+    # ATTEMPT 2
+    #
+    # Same order request.
+    # Same order idempotency key.
+    #
+    # We expect the service to recover the pending payment.
+    # -----------------------------------------------------
+
+    response = service.create_order(request)
+
+    # -----------------------------------------------------
+    # It MUST be the original order.
+    #
+    # We must not create another order.
+    # -----------------------------------------------------
+
+    assert response.order_id == original_order_id
+
+    # -----------------------------------------------------
+    # Payment should now be recovered as SUCCESS.
+    # -----------------------------------------------------
+
+    assert response.status == OrderStatus.CONFIRMED.value
+
+    # -----------------------------------------------------
+    # Verify persisted order.
+    # -----------------------------------------------------
+
+    db_session.expire_all()
+
+    recovered_order = db_session.scalar(
+        select(Order).where(
+            Order.order_id == original_order_id
+        )
+    )
+
+    assert recovered_order is not None
+
+    assert (
+        recovered_order.status
+        == OrderStatus.CONFIRMED.value
+    )
+
+    # -----------------------------------------------------
+    # Exactly ONE payment should exist.
+    # -----------------------------------------------------
+
+    payments = list(
+        db_session.scalars(
+            select(Payment).where(
+                Payment.order_id == original_order_id
+            )
+        ).all()
+    )
+
+    assert len(payments) == 1
+
+    assert (
+        payments[0].status
+        == PaymentStatus.SUCCESS.value
+    )
+
+    # -----------------------------------------------------
+    # Inventory must remain reserved.
+    #
+    # Successful payment does NOT release reservation.
+    # Warehouse still needs those units for fulfillment.
+    # -----------------------------------------------------
+
+    inventory = db_session.scalar(
+        select(Inventory).where(
+            Inventory.product_id == "PROD-001",
+            Inventory.warehouse_id == "WH-001",
+        )
+    )
+
+    assert inventory is not None
+    assert inventory.reserved_quantity == 2

@@ -13,7 +13,6 @@ from app.models.order import Order
 from app.models.product import Product
 from app.models.warehouse import Warehouse
 
-
 # =========================================================
 # CLIENT
 # =========================================================
@@ -215,11 +214,9 @@ def test_create_order_api_success(
     assert data["warehouse_id"] == "WH-001"
 
     # Decimal is serialized to JSON.
-    assert Decimal(str(data["total_amount"])) == Decimal(
-        "1000.00"
-    )
+    assert Decimal(str(data["total_amount"])) == Decimal("1000.00")
 
-    assert data["message"] == "Order created successfully"
+    assert data["message"] == "Order created and payment successful"
 
     # Verify actual database state.
 
@@ -298,15 +295,9 @@ def test_create_order_api_idempotency(
     first_data = first.json()
     second_data = second.json()
 
-    assert (
-        second_data["order_id"]
-        == first_data["order_id"]
-    )
+    assert second_data["order_id"] == first_data["order_id"]
 
-    assert (
-        second_data["message"]
-        == "Order already exists"
-    )
+    assert second_data["message"] == "Order already exists"
 
     db_session.refresh(inventory)
 
@@ -381,11 +372,7 @@ def test_create_order_api_insufficient_inventory(
 
     assert response.status_code == 409
 
-    orders = list(
-        db_session.scalars(
-            select(Order)
-        ).all()
-    )
+    orders = list(db_session.scalars(select(Order)).all())
 
     assert orders == []
 
@@ -439,7 +426,6 @@ def test_create_order_api_rejects_empty_items(
 # 9. GET ORDER - SUCCESS
 # =========================================================
 
-
 def test_get_order_api_success(
     client: TestClient,
     db_session: Session,
@@ -465,17 +451,28 @@ def test_get_order_api_success(
 
     data = response.json()
 
+    # -------------------------------------------------
+    # ORDER
+    # -------------------------------------------------
+
     assert data["order_id"] == order_id
     assert data["customer_id"] == "CUST-001"
     assert data["warehouse_id"] == "WH-001"
     assert data["status"] == "CONFIRMED"
+
+    # -------------------------------------------------
+    # ITEMS
+    # -------------------------------------------------
 
     assert len(data["items"]) == 1
 
     item = data["items"][0]
 
     assert item["product_id"] == "PROD-001"
-    assert item["product_name"] == "Test Product PROD-001"
+    assert (
+        item["product_name"]
+        == "Test Product PROD-001"
+    )
     assert item["quantity"] == 2
 
     assert Decimal(
@@ -486,27 +483,51 @@ def test_get_order_api_success(
         str(item["line_total"])
     ) == Decimal("1000.00")
 
+    # -------------------------------------------------
+    # SHIPPING
+    # -------------------------------------------------
+
     assert (
         data["shipping_address"]["city"]
         == "Bengaluru"
     )
 
+    # -------------------------------------------------
+    # PRICING
+    # -------------------------------------------------
+
     assert Decimal(
         str(data["pricing"]["total_amount"])
     ) == Decimal("1000.00")
 
-    assert len(data["status_history"]) == 1
+    # -------------------------------------------------
+    # STATUS HISTORY
+    # -------------------------------------------------
+
+    assert len(data["status_history"]) == 2
+
+    payment_pending = data["status_history"][0]
 
     assert (
-        data["status_history"][0]["status"]
-        == "CONFIRMED"
+        payment_pending["status"]
+        == "PAYMENT_PENDING"
     )
 
-    assert (
-        data["status_history"][0]["closed_at"]
-        is None
-    )
+    assert payment_pending["opened_at"] is not None
 
+    # PAYMENT_PENDING must be closed because
+    # payment has already succeeded.
+    assert payment_pending["closed_at"] is not None
+
+    confirmed = data["status_history"][1]
+
+    assert confirmed["status"] == "CONFIRMED"
+
+    assert confirmed["opened_at"] is not None
+
+    # CONFIRMED is the current status, therefore
+    # its history record remains open.
+    assert confirmed["closed_at"] is None
 
 # =========================================================
 # 10. GET ORDER - NOT FOUND
@@ -516,9 +537,7 @@ def test_get_order_api_success(
 def test_get_order_api_not_found(
     client: TestClient,
 ):
-    response = client.get(
-        "/api/v1/orders/ORD-NOT-FOUND"
-    )
+    response = client.get("/api/v1/orders/ORD-NOT-FOUND")
 
     assert response.status_code == 404
 
@@ -553,9 +572,7 @@ def test_cancel_order_api_success(
 
     assert inventory.reserved_quantity == 3
 
-    response = client.post(
-        f"/api/v1/orders/{order_id}/cancel"
-    )
+    response = client.post(f"/api/v1/orders/{order_id}/cancel")
 
     assert response.status_code == 200
 
@@ -592,24 +609,17 @@ def test_cancel_order_api_idempotent(
 
     order_id = create_response.json()["order_id"]
 
-    first = client.post(
-        f"/api/v1/orders/{order_id}/cancel"
-    )
+    first = client.post(f"/api/v1/orders/{order_id}/cancel")
 
     assert first.status_code == 200
 
-    second = client.post(
-        f"/api/v1/orders/{order_id}/cancel"
-    )
+    second = client.post(f"/api/v1/orders/{order_id}/cancel")
 
     assert second.status_code == 200
 
     assert second.json()["status"] == "CANCELLED"
 
-    assert (
-        second.json()["message"]
-        == "Order is already cancelled"
-    )
+    assert second.json()["message"] == "Order is already cancelled"
 
 
 # =========================================================
@@ -620,8 +630,6 @@ def test_cancel_order_api_idempotent(
 def test_cancel_order_api_not_found(
     client: TestClient,
 ):
-    response = client.post(
-        "/api/v1/orders/ORD-NOT-FOUND/cancel"
-    )
+    response = client.post("/api/v1/orders/ORD-NOT-FOUND/cancel")
 
     assert response.status_code == 404
