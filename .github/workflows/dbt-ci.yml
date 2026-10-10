@@ -10,6 +10,11 @@ on:
       - "snapshots/**"
       - "dbt_tests/**"
       - ".github/workflows/dbt-ci.yml"
+      - "scripts/**"
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "requirements.txt"
   pull_request:
     paths:
       - "dbt_project.yml"
@@ -19,6 +24,11 @@ on:
       - "snapshots/**"
       - "dbt_tests/**"
       - ".github/workflows/dbt-ci.yml"
+      - "scripts/**"
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "requirements.txt"
 
 jobs:
   parse-dbt:
