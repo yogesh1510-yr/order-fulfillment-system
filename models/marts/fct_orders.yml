@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: fct_orders
+    description: "Analytics fact table containing one row per order."
+
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+
+      - name: status
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('order_status_mapping')
+                field: status

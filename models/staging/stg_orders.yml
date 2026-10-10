@@ -1,0 +1,47 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: >
+      Staging model for application orders.
+      Reads from the public.orders source and normalizes
+      order statuses for consistent downstream use.
+
+    columns:
+      - name: order_id
+        description: "Unique identifier for an order."
+        data_tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: "Identifier of the customer who placed the order."
+
+      - name: warehouse_id
+        description: "Identifier of the warehouse fulfilling the order."
+
+      - name: status
+        description: >
+          Normalized order status, converted to uppercase
+          with leading and trailing whitespace removed.
+
+      - name: subtotal_amount
+        description: "Order subtotal before tax, handling, and discount."
+
+      - name: tax_amount
+        description: "Tax amount associated with the order."
+
+      - name: handling_amount
+        description: "Handling charge associated with the order."
+
+      - name: discount_amount
+        description: "Discount applied to the order."
+
+      - name: total_amount
+        description: "Final order amount stored by the application."
+
+      - name: created_at
+        description: "Timestamp when the order was created."
+
+      - name: updated_at
+        description: "Timestamp when the order was last updated."
