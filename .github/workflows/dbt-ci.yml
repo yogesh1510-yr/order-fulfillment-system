@@ -24,6 +24,9 @@ jobs:
   parse-dbt:
     runs-on: ubuntu-latest
 
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
     services:
       postgres:
         image: postgres:16
@@ -53,6 +56,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install dbt-core==1.12.5 dbt-postgres==1.11.0
 
+      - name: Install application dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Initialize application schema
+        run: alembic upgrade head
+
+      - name: Generate synthetic data
+        run: python scripts/seed_analytics_data.py
+
       - name: Create temporary dbt profile
         run: |
           mkdir -p ~/.dbt
@@ -76,3 +88,6 @@ jobs:
 
       - name: Compile dbt models
         run: dbt compile --target ci
+
+      - name: Build dbt models and run tests
+        run: dbt build --target ci
