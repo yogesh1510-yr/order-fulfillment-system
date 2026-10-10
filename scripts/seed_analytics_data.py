@@ -119,7 +119,7 @@ def create_customers(
     session: Session,
 ) -> list[Customer]:
 
-    print("Creating customers...")
+    print("Creating customers into database...")
 
     customers = []
 
