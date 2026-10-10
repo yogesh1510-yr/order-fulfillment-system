@@ -1,26 +1,21 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import DATABASE_URL
+from app.core.config import get_settings
 
 
-# ---------------------------------------------------------
-# SQLAlchemy Engine
-# ---------------------------------------------------------
-# The Engine manages database connectivity and the
-# underlying connection pool used to communicate with
-# PostgreSQL.
+settings = get_settings()
+
+
 engine = create_engine(
-    DATABASE_URL,
-    echo=False,
+    settings.database_url,
+    echo=settings.db_echo,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_pre_ping=True,
 )
 
 
-# ---------------------------------------------------------
-# Session factory
-# ---------------------------------------------------------
-# SessionLocal is a factory. Calling SessionLocal()
-# creates a new SQLAlchemy Session.
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,

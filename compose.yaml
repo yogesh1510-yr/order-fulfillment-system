@@ -1,0 +1,54 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: order-fulfillment-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: novacart
+      POSTGRES_USER: novacart_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - order-fulfillment-postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novacart_app -d novacart"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: order-fulfillment-api
+    restart: unless-stopped
+
+    ports:
+      - "8080:8000"
+
+    environment:
+      DATABASE_URL: postgresql+psycopg://novacart_app:${POSTGRES_PASSWORD}@db:5432/novacart
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  order-fulfillment-postgres-data:

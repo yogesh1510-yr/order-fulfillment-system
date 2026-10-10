@@ -1,0 +1,3 @@
+    pydantic-settings
+    psycopg[binary]
+    psycopg2-binary

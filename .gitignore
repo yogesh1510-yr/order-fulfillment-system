@@ -4,6 +4,7 @@
 .env
 .env.*
 !.env.example
+.env.test
 
 # ============================================
 # Python virtual environments
@@ -45,4 +46,46 @@ Thumbs.db
 # ============================================
 # Logs
 # ============================================
-*.log
+*.log.env.compose
+
+# ============================================================
+# Data Engineering - Generated Data
+# ============================================================
+
+data/raw/*
+!data/raw/.gitkeep
+
+data/processed/*
+!data/processed/.gitkeep
+
+data/analytics/*
+!data/analytics/.gitkeep
+
+data/metadata/*
+!data/metadata/.gitkeep
+
+# ============================================
+# Local virtual environments
+# ============================================
+.airflow-venv/
+.dbt-venv/
+.venv/
+
+# ============================================
+# dbt generated artifacts
+# ============================================
+target/
+dbt_packages/
+logs/
+
+# ============================================
+# Airflow local configuration and logs
+# ============================================
+airflow/logs/
+airflow/config/airflow.cfg
+airflow/config/webserver_config.py
+
+# ============================================
+# Python environment artifacts
+# ============================================
+python3.12

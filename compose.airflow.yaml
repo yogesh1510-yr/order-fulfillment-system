@@ -1,0 +1,107 @@
+x-airflow-common: &airflow-common
+  image: fde-airflow:3.1.0
+
+  environment: &airflow-common-env
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: "dev-airflow-jwt-secret-change-me"
+    PYTHONPATH: /opt/project
+    DATABASE_URL: postgresql+psycopg2://novacart_app:9686@db:5432/novacart
+
+  user: "${AIRFLOW_UID:-1000}:0"
+
+  working_dir: /opt/project
+
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/config:/opt/airflow/config
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./pipelines:/opt/project/pipelines
+    - ./app:/opt/project/app
+    - ./data:/opt/project/data
+
+services:
+
+  airflow-postgres:
+    image: postgres:16-alpine
+    container_name: airflow-postgres
+
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow -d airflow" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+
+    container_name: airflow-init
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+
+    command: db migrate
+
+    restart: "no"
+
+  airflow-scheduler:
+    <<: *airflow-common
+
+    container_name: airflow-scheduler
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    command: scheduler
+
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+
+    container_name: airflow-dag-processor
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    command: dag-processor
+
+    restart: unless-stopped
+
+  airflow-api-server:
+    <<: *airflow-common
+
+    container_name: airflow-api-server
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    command: api-server
+
+    ports:
+      - "8081:8080"
+
+    restart: unless-stopped
+
+volumes:
+  airflow-postgres-data:

@@ -1,11 +1,28 @@
 from datetime import datetime, timezone
+
 from decimal import Decimal
+
 from uuid import uuid4
 
+
 from sqlalchemy.exc import IntegrityError
+
 from sqlalchemy.orm import Session
 
+
+from app.repositories.payments import PaymentRepository
+
+from app.models.payment import Payment
+
+
+from app.payments.gateway import (
+    PaymentGateway,
+    PaymentStatus,
+)
+
+
 from app.core.enums import OrderStatus
+
 
 from app.core.exceptions import (
     CustomerNotFoundError,
@@ -16,6 +33,7 @@ from app.core.exceptions import (
     InventoryConsistencyError,
 )
 
+
 from app.models.order import (
     Order,
     OrderItem,
@@ -23,25 +41,31 @@ from app.models.order import (
     OrderStatusHistory,
 )
 
+
 from app.repositories.customers import (
     CustomerRepository,
 )
+
 
 from app.repositories.products import (
     ProductRepository,
 )
 
+
 from app.repositories.inventory import (
     InventoryRepository,
 )
+
 
 from app.repositories.warehouse import (
     WarehouseRepository,
 )
 
+
 from app.repositories.orders import (
     OrderRepository,
 )
+
 
 from app.schemas.orders import (
     CreateOrderRequest,
@@ -55,27 +79,47 @@ from app.schemas.orders import (
 )
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+logger.info("Application logging configured")
+
+
 class OrderService:
     """
     Contains order fulfillment business logic.
     """
-    
 
     def __init__(
         self,
         db: Session,
+        payment_gateway: PaymentGateway | None = None,
     ):
+
         self.db = db
 
         # Every repository shares the SAME Session.
+
         self.customers = CustomerRepository(db)
+
         self.products = ProductRepository(db)
+
         self.inventory = InventoryRepository(db)
+
         self.warehouses = WarehouseRepository(db)
+
         self.orders = OrderRepository(db)
 
+        self.payments = PaymentRepository(db)
+
+        self.payment_gateway = payment_gateway
+
     # =====================================================
+
     # CREATE ORDER
+
     # =====================================================
 
     def create_order(
@@ -85,33 +129,88 @@ class OrderService:
 
         try:
 
+            logger.info(
+                "Order creation started customer_id=%s",
+                request.customer_id,
+            )
+
             # -------------------------------------------------
+
             # 1. IDEMPOTENCY
+
             # -------------------------------------------------
 
             existing_order = self.orders.get_by_idempotency_key(request.idempotency_key)
 
             if existing_order is not None:
 
+                # -------------------------------------------------
+                # PAYMENT RECOVERY
+                # -------------------------------------------------
+                #
+                # The order already exists, but payment is still
+                # uncertain.
+                #
+                # This can happen when:
+                #
+                #   1. Provider successfully processed payment.
+                #   2. Provider response was lost / timed out.
+                #   3. Our database remained PAYMENT_PENDING.
+                #   4. Client retries the same order request.
+                #
+                # We must NOT create another order or reserve
+                # inventory again.
+                #
+                # Instead, retry the SAME logical payment using
+                # the deterministic payment idempotency key.
+                #
+                # The payment provider will return the original
+                # result instead of charging again.
+                # -------------------------------------------------
+
+                if (
+                    existing_order.status == OrderStatus.PAYMENT_PENDING.value
+                    and self.payment_gateway is not None
+                ):
+                    logger.info(
+                        "Recovering pending payment " "order_id=%s",
+                        existing_order.order_id,
+                    )
+
+                    return self._process_payment(existing_order)
+
+                # -------------------------------------------------
+                # NORMAL IDEMPOTENT RESPONSE
+                # -------------------------------------------------
+                #
+                # CONFIRMED, CANCELLED, etc. should simply return
+                # the existing order.
+                # -------------------------------------------------
+
                 return CreateOrderResponse(
                     order_id=existing_order.order_id,
                     status=existing_order.status,
-                    warehouse_id=(existing_order.warehouse_id),
-                    total_amount=(existing_order.total_amount),
+                    warehouse_id=existing_order.warehouse_id,
+                    total_amount=existing_order.total_amount,
                     message="Order already exists",
                 )
 
             # -------------------------------------------------
+
             # 2. CUSTOMER
+
             # -------------------------------------------------
 
             customer = self.customers.get_by_id(request.customer_id)
 
             if customer is None:
+
                 raise CustomerNotFoundError(request.customer_id)
 
             # -------------------------------------------------
+
             # 3. AGGREGATE PRODUCT QUANTITIES
+
             # -------------------------------------------------
 
             requested_quantities: dict[
@@ -132,7 +231,9 @@ class OrderService:
             product_ids = list(requested_quantities.keys())
 
             # -------------------------------------------------
+
             # 4. PRODUCTS
+
             # -------------------------------------------------
 
             products = self.products.get_by_ids(product_ids)
@@ -146,16 +247,21 @@ class OrderService:
             ]
 
             if missing_product_ids:
+
                 raise ProductNotFoundError(missing_product_ids)
 
             # -------------------------------------------------
+
             # 5. LOCK INVENTORY
+
             # -------------------------------------------------
 
             inventory_records = self.inventory.get_for_products_for_update(product_ids)
 
             # -------------------------------------------------
+
             # 6. GROUP INVENTORY BY WAREHOUSE
+
             # -------------------------------------------------
 
             warehouse_inventory = {}
@@ -163,6 +269,7 @@ class OrderService:
             for inventory in inventory_records:
 
                 if inventory.warehouse_id not in warehouse_inventory:
+
                     warehouse_inventory[inventory.warehouse_id] = {}
 
                 warehouse_inventory[inventory.warehouse_id][
@@ -170,7 +277,9 @@ class OrderService:
                 ] = inventory
 
             # -------------------------------------------------
+
             # 7. ELIGIBLE WAREHOUSES
+
             # -------------------------------------------------
 
             eligible_warehouse_ids = []
@@ -189,13 +298,17 @@ class OrderService:
                 )
 
                 if can_fulfill:
+
                     eligible_warehouse_ids.append(warehouse_id)
 
             if not eligible_warehouse_ids:
+
                 raise InsufficientInventoryError()
 
             # -------------------------------------------------
+
             # 8. WAREHOUSES
+
             # -------------------------------------------------
 
             warehouses = self.warehouses.get_by_ids(eligible_warehouse_ids)
@@ -205,7 +318,9 @@ class OrderService:
             }
 
             # -------------------------------------------------
+
             # 9. WAREHOUSE SCORING
+
             # -------------------------------------------------
 
             shipping = request.shipping_address
@@ -217,15 +332,19 @@ class OrderService:
                 warehouse = warehouses_by_id[warehouse_id]
 
                 if warehouse.postal_code.lower() == shipping.postal_code.lower():
+
                     location_score = 3
 
                 elif warehouse.city.lower() == shipping.city.lower():
+
                     location_score = 2
 
                 elif warehouse.state.lower() == shipping.state.lower():
+
                     location_score = 1
 
                 else:
+
                     location_score = 0
 
                 remaining_stock = sum(
@@ -243,7 +362,9 @@ class OrderService:
                 )
 
             # -------------------------------------------------
+
             # 10. SELECT WAREHOUSE
+
             # -------------------------------------------------
 
             selected_warehouse_id = max(
@@ -252,7 +373,9 @@ class OrderService:
             )
 
             # -------------------------------------------------
+
             # 11. PRICING
+
             # -------------------------------------------------
 
             subtotal_amount = sum(
@@ -274,7 +397,9 @@ class OrderService:
             )
 
             # -------------------------------------------------
+
             # 12. IDs + TIMESTAMP
+
             # -------------------------------------------------
 
             order_id = f"ORD-" f"{uuid4().hex[:12].upper()}"
@@ -282,19 +407,21 @@ class OrderService:
             now = datetime.now(timezone.utc)
 
             # -------------------------------------------------
+
             # 13. ORDER
+
             # -------------------------------------------------
 
             order = Order(
                 order_id=order_id,
                 customer_id=request.customer_id,
-                warehouse_id=(selected_warehouse_id),
-                idempotency_key=(request.idempotency_key),
-                status=(OrderStatus.CONFIRMED.value),
-                subtotal_amount=(subtotal_amount),
+                warehouse_id=selected_warehouse_id,
+                idempotency_key=request.idempotency_key,
+                status=OrderStatus.PAYMENT_PENDING.value,
+                subtotal_amount=subtotal_amount,
                 tax_amount=tax_amount,
-                handling_amount=(handling_amount),
-                discount_amount=(discount_amount),
+                handling_amount=handling_amount,
+                discount_amount=discount_amount,
                 total_amount=total_amount,
                 created_at=now,
                 updated_at=now,
@@ -303,7 +430,9 @@ class OrderService:
             self.orders.add(order)
 
             # -------------------------------------------------
+
             # 14. ORDER ITEMS
+
             # -------------------------------------------------
 
             for (
@@ -325,7 +454,9 @@ class OrderService:
                 self.orders.add_item(order_item)
 
             # -------------------------------------------------
+
             # 15. SHIPPING ADDRESS SNAPSHOT
+
             # -------------------------------------------------
 
             shipping_address = OrderShippingAddress(
@@ -344,13 +475,15 @@ class OrderService:
             self.orders.add_shipping_address(shipping_address)
 
             # -------------------------------------------------
+
             # 16. STATUS HISTORY
+
             # -------------------------------------------------
 
             status_history = OrderStatusHistory(
-                status_history_id=(f"OSH-" f"{uuid4().hex[:12].upper()}"),
+                status_history_id=f"OSH-{uuid4().hex[:12].upper()}",
                 order_id=order_id,
-                status=(OrderStatus.CONFIRMED.value),
+                status=OrderStatus.PAYMENT_PENDING.value,
                 status_open_date=now,
                 status_close_date=None,
             )
@@ -358,7 +491,9 @@ class OrderService:
             self.orders.add_status_history(status_history)
 
             # -------------------------------------------------
+
             # 17. RESERVE INVENTORY
+
             # -------------------------------------------------
 
             for (
@@ -371,25 +506,29 @@ class OrderService:
                 inventory.reserved_quantity += quantity
 
             # -------------------------------------------------
+
             # 18. COMMIT
+
             # -------------------------------------------------
 
             self.db.commit()
 
-            return CreateOrderResponse(
-                order_id=order.order_id,
-                status=order.status,
-                warehouse_id=(order.warehouse_id),
-                total_amount=(order.total_amount),
-                message=("Order created successfully"),
+            logger.info(
+                "Order reserved and awaiting payment " "order_id=%s warehouse_id=%s",
+                order_id,
+                selected_warehouse_id,
             )
+
+            return self._process_payment(order)
 
         except IntegrityError:
 
             self.db.rollback()
 
             # Possible concurrent request using
+
             # the same idempotency key.
+
             existing_order = self.orders.get_by_idempotency_key(request.idempotency_key)
 
             if existing_order is not None:
@@ -406,11 +545,243 @@ class OrderService:
 
         except Exception:
 
+            logger.exception(
+                "Order creation failed customer_id=%s",
+                request.customer_id,
+            )
+
             self.db.rollback()
+
             raise
 
     # =====================================================
+
+    # PROCESS PAYMENT
+
+    # =====================================================
+
+    def _process_payment(
+        self,
+        order: Order,
+    ) -> CreateOrderResponse:
+
+        if self.payment_gateway is None:
+
+            return CreateOrderResponse(
+                order_id=order.order_id,
+                status=order.status,
+                warehouse_id=order.warehouse_id,
+                total_amount=order.total_amount,
+                message="Order created and awaiting payment",
+            )
+
+        logger.info(
+            "Payment attempt started order_id=%s amount=%s",
+            order.order_id,
+            order.total_amount,
+        )
+
+        # -------------------------------------------------
+
+        # CALL PAYMENT PROVIDER
+
+        #
+
+        # The key is deterministic.
+
+        # Retrying the same order therefore retries the
+
+        # same logical payment operation.
+
+        # -------------------------------------------------
+
+        payment_result = self.payment_gateway.charge(
+            order_id=order.order_id,
+            amount=order.total_amount,
+            idempotency_key=f"PAYMENT-{order.order_id}",
+        )
+
+        # =================================================
+
+        # PAYMENT SUCCESS
+
+        # =================================================
+
+        if payment_result.status == PaymentStatus.SUCCESS:
+
+            now = datetime.now(timezone.utc)
+
+            locked_order = self.orders.get_by_id_for_update(order.order_id)
+
+            if locked_order is None:
+
+                raise OrderNotFoundError(order.order_id)
+
+            # Another concurrent payment recovery may have completed
+            # while this request was waiting for the row lock.
+            #
+            # Always re-check state AFTER acquiring the lock.
+            if locked_order.status == OrderStatus.CONFIRMED.value:
+                logger.info(
+                    "Payment already recovered by another request " "order_id=%s",
+                    locked_order.order_id,
+                )
+
+                return CreateOrderResponse(
+                    order_id=locked_order.order_id,
+                    status=locked_order.status,
+                    warehouse_id=locked_order.warehouse_id,
+                    total_amount=locked_order.total_amount,
+                    message="Order payment already confirmed",
+                )
+
+            payment = Payment(
+                payment_id=f"PAY-{uuid4().hex[:12].upper()}",
+                order_id=locked_order.order_id,
+                status=PaymentStatus.SUCCESS.value,
+                amount=locked_order.total_amount,
+                provider_transaction_id=(payment_result.transaction_id),
+                failure_reason=None,
+            )
+
+            self.payments.add(payment)
+
+            current_history = self.orders.get_open_status_history(locked_order.order_id)
+
+            if current_history is not None:
+
+                current_history.status_close_date = now
+
+            locked_order.status = OrderStatus.CONFIRMED.value
+
+            locked_order.updated_at = now
+
+            confirmed_history = OrderStatusHistory(
+                status_history_id=(f"OSH-{uuid4().hex[:12].upper()}"),
+                order_id=locked_order.order_id,
+                status=OrderStatus.CONFIRMED.value,
+                status_open_date=now,
+                status_close_date=None,
+            )
+
+            self.orders.add_status_history(confirmed_history)
+
+            self.db.commit()
+
+            logger.info(
+                "Payment succeeded and order confirmed "
+                "order_id=%s transaction_id=%s",
+                locked_order.order_id,
+                payment_result.transaction_id,
+            )
+
+            return CreateOrderResponse(
+                order_id=locked_order.order_id,
+                status=locked_order.status,
+                warehouse_id=locked_order.warehouse_id,
+                total_amount=locked_order.total_amount,
+                message="Order created and payment successful",
+            )
+
+        # =================================================
+
+        # PAYMENT FAILED
+
+        # =================================================
+
+        now = datetime.now(timezone.utc)
+
+        locked_order = self.orders.get_by_id_for_update(order.order_id)
+
+        if locked_order is None:
+
+            raise OrderNotFoundError(order.order_id)
+
+        failed_payment = Payment(
+            payment_id=f"PAY-{uuid4().hex[:12].upper()}",
+            order_id=locked_order.order_id,
+            status=PaymentStatus.FAILED.value,
+            amount=locked_order.total_amount,
+            provider_transaction_id=(payment_result.transaction_id),
+            failure_reason=payment_result.failure_reason,
+        )
+
+        self.payments.add(failed_payment)
+
+        items = list(locked_order.items)
+
+        product_ids = [item.product_id for item in items]
+
+        inventory_records = self.inventory.get_for_order_cancellation(
+            warehouse_id=locked_order.warehouse_id,
+            product_ids=product_ids,
+        )
+
+        inventory_by_product = {
+            inventory.product_id: inventory for inventory in inventory_records
+        }
+
+        for item in items:
+
+            inventory = inventory_by_product.get(item.product_id)
+
+            if inventory is None:
+
+                raise InventoryConsistencyError(
+                    "Inventory record required for payment "
+                    "failure release was not found"
+                )
+
+            if inventory.reserved_quantity < item.quantity:
+
+                raise InventoryConsistencyError(
+                    "Reserved inventory is lower than the "
+                    "quantity being released after payment "
+                    "failure"
+                )
+
+            inventory.reserved_quantity -= item.quantity
+
+        current_history = self.orders.get_open_status_history(locked_order.order_id)
+
+        if current_history is not None:
+
+            current_history.status_close_date = now
+
+        locked_order.status = OrderStatus.CANCELLED.value
+
+        locked_order.updated_at = now
+
+        cancelled_history = OrderStatusHistory(
+            status_history_id=(f"OSH-{uuid4().hex[:12].upper()}"),
+            order_id=locked_order.order_id,
+            status=OrderStatus.CANCELLED.value,
+            status_open_date=now,
+            status_close_date=None,
+        )
+
+        self.orders.add_status_history(cancelled_history)
+
+        self.db.commit()
+
+        logger.warning(
+            "Payment failed and order cancelled " "order_id=%s reason=%s",
+            locked_order.order_id,
+            payment_result.failure_reason,
+        )
+
+        return CreateOrderResponse(
+            order_id=locked_order.order_id,
+            status=locked_order.status,
+            warehouse_id=locked_order.warehouse_id,
+            total_amount=locked_order.total_amount,
+            message="Payment failed and order cancelled",
+        )
+
+    # =====================================================
+
     # GET ORDER
+
     # =====================================================
 
     def get_order(
@@ -421,10 +792,13 @@ class OrderService:
         order = self.orders.get_complete_order(order_id)
 
         if order is None:
+
             raise OrderNotFoundError(order_id)
 
         # -------------------------------------------------
+
         # ITEMS
+
         # -------------------------------------------------
 
         items = [
@@ -439,7 +813,9 @@ class OrderService:
         ]
 
         # -------------------------------------------------
+
         # SHIPPING ADDRESS
+
         # -------------------------------------------------
 
         shipping_response = None
@@ -461,7 +837,9 @@ class OrderService:
             )
 
         # -------------------------------------------------
+
         # STATUS HISTORY
+
         # -------------------------------------------------
 
         history = [
@@ -477,7 +855,9 @@ class OrderService:
         ]
 
         # -------------------------------------------------
+
         # RESPONSE
+
         # -------------------------------------------------
 
         return OrderResponse(
@@ -501,7 +881,9 @@ class OrderService:
         )
 
     # =====================================================
+
     # CANCEL ORDER
+
     # =====================================================
 
     def cancel_order(
@@ -512,16 +894,21 @@ class OrderService:
         try:
 
             # -------------------------------------------------
+
             # 1. LOCK ORDER
+
             # -------------------------------------------------
 
             order = self.orders.get_by_id_for_update(order_id)
 
             if order is None:
+
                 raise OrderNotFoundError(order_id)
 
             # -------------------------------------------------
+
             # 2. ALREADY CANCELLED
+
             # -------------------------------------------------
 
             if order.status == OrderStatus.CANCELLED.value:
@@ -533,12 +920,15 @@ class OrderService:
                 )
 
             # -------------------------------------------------
+
             # 3. VALIDATE STATUS
+
             # -------------------------------------------------
 
             if order.status not in {
                 OrderStatus.CONFIRMED.value,
             }:
+
                 raise (
                     OrderCannotBeCancelledError(
                         order_id=(order.order_id),
@@ -547,7 +937,9 @@ class OrderService:
                 )
 
             # -------------------------------------------------
+
             # 4. ORDER ITEMS
+
             # -------------------------------------------------
 
             items = list(order.items)
@@ -555,7 +947,9 @@ class OrderService:
             product_ids = [item.product_id for item in items]
 
             # -------------------------------------------------
+
             # 5. LOCK INVENTORY
+
             # -------------------------------------------------
 
             inventory_records = self.inventory.get_for_order_cancellation(
@@ -568,7 +962,9 @@ class OrderService:
             }
 
             # -------------------------------------------------
+
             # 6. RELEASE INVENTORY
+
             # -------------------------------------------------
 
             for item in items:
@@ -576,6 +972,7 @@ class OrderService:
                 inventory = inventory_by_product.get(item.product_id)
 
                 if inventory is None:
+
                     raise (
                         InventoryConsistencyError(
                             "Inventory record "
@@ -585,6 +982,7 @@ class OrderService:
                     )
 
                 if inventory.reserved_quantity < item.quantity:
+
                     raise (
                         InventoryConsistencyError(
                             "Reserved inventory is "
@@ -596,7 +994,9 @@ class OrderService:
                 inventory.reserved_quantity -= item.quantity
 
             # -------------------------------------------------
+
             # 7. CLOSE CURRENT STATUS
+
             # -------------------------------------------------
 
             now = datetime.now(timezone.utc)
@@ -604,10 +1004,13 @@ class OrderService:
             current_history = self.orders.get_open_status_history(order_id)
 
             if current_history is not None:
+
                 current_history.status_close_date = now
 
             # -------------------------------------------------
+
             # 8. UPDATE ORDER
+
             # -------------------------------------------------
 
             order.status = OrderStatus.CANCELLED.value
@@ -615,7 +1018,9 @@ class OrderService:
             order.updated_at = now
 
             # -------------------------------------------------
+
             # 9. NEW STATUS HISTORY
+
             # -------------------------------------------------
 
             cancelled_history = OrderStatusHistory(
@@ -629,7 +1034,9 @@ class OrderService:
             self.orders.add_status_history(cancelled_history)
 
             # -------------------------------------------------
+
             # 10. COMMIT
+
             # -------------------------------------------------
 
             self.db.commit()
@@ -643,4 +1050,5 @@ class OrderService:
         except Exception:
 
             self.db.rollback()
+
             raise

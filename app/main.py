@@ -24,10 +24,17 @@ from app.api.exception_handlers import (
     inventory_consistency_handler,
 )
 
+from app.core.logging import configure_logging
+from app.middleware.request_id import RequestIDMiddleware
+
+configure_logging()
+
 app = FastAPI(
     title=("E-Commerce Order and Order Fulfillment Platform"),
     version="1.0.0",
 )
+
+app.add_middleware(RequestIDMiddleware)
 
 app.add_exception_handler(
     CustomerNotFoundError,
