@@ -1,0 +1,12 @@
+novacart:
+  target: airflow
+  outputs:
+    airflow:
+      type: postgres
+      host: db
+      port: 5432
+      user: "{{ env_var('DBT_USER') }}"
+      password: "{{ env_var('DBT_PASSWORD') }}"
+      dbname: novacart
+      schema: dbt_airflow
+      threads: 2

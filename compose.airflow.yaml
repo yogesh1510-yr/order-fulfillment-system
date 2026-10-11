@@ -8,6 +8,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__API_AUTH__JWT_SECRET: "dev-airflow-jwt-secret-change-me"
     PYTHONPATH: /opt/project
     DATABASE_URL: postgresql+psycopg2://novacart_app:9686@db:5432/novacart
+    DBT_PROFILES_DIR: /opt/airflow/dbt
+    DBT_USER: ${DBT_USER}
+    DBT_PASSWORD: ${DBT_PASSWORD}
 
   user: "${AIRFLOW_UID:-1000}:0"
 
@@ -21,6 +24,7 @@ x-airflow-common: &airflow-common
     - ./pipelines:/opt/project/pipelines
     - ./app:/opt/project/app
     - ./data:/opt/project/data
+    - ./airflow/dbt:/opt/airflow/dbt:ro
 
 services:
 

@@ -1,3 +1,5 @@
-    pydantic-settings
-    psycopg[binary]
-    psycopg2-binary
+pydantic-settings
+psycopg[binary]
+psycopg2-binary
+dbt-core==1.12.5
+dbt-postgres==1.11.0
